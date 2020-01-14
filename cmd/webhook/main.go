@@ -20,6 +20,8 @@ import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/injection/sharedmain"
@@ -29,6 +31,7 @@ import (
 	"knative.dev/pkg/webhook"
 	"knative.dev/pkg/webhook/certificates"
 	"knative.dev/pkg/webhook/configmaps"
+	"knative.dev/pkg/webhook/psbinding"
 	"knative.dev/pkg/webhook/resourcesemantics"
 	"knative.dev/pkg/webhook/resourcesemantics/defaulting"
 	"knative.dev/pkg/webhook/resourcesemantics/validation"
@@ -36,6 +39,7 @@ import (
 	// The set of controllers this controller process runs.
 	"github.com/mattmoor/net-contour/pkg/reconciler/contour"
 	github "knative.dev/eventing-contrib/github/pkg/reconciler"
+	"knative.dev/eventing/pkg/reconciler/sinkbinding"
 	"knative.dev/serving/pkg/reconciler/autoscaling/hpa"
 	"knative.dev/serving/pkg/reconciler/configuration"
 	"knative.dev/serving/pkg/reconciler/gc"
@@ -48,6 +52,7 @@ import (
 
 	// resource validation types
 	githubv1alpha1 "knative.dev/eventing-contrib/github/pkg/apis/sources/v1alpha1"
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	net "knative.dev/serving/pkg/apis/networking/v1alpha1"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -67,7 +72,7 @@ import (
 	domainconfig "knative.dev/serving/pkg/reconciler/route/config"
 )
 
-var types = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
+var kinds = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
 	v1alpha1.SchemeGroupVersion.WithKind("Revision"):      &v1alpha1.Revision{},
 	v1alpha1.SchemeGroupVersion.WithKind("Configuration"): &v1alpha1.Configuration{},
 	v1alpha1.SchemeGroupVersion.WithKind("Route"):         &v1alpha1.Route{},
@@ -89,6 +94,7 @@ var types = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
 	net.SchemeGroupVersion.WithKind("ServerlessService"): &net.ServerlessService{},
 
 	githubv1alpha1.SchemeGroupVersion.WithKind("GitHubSource"): &githubv1alpha1.GitHubSource{},
+	sourcesv1alpha1.SchemeGroupVersion.WithKind("SinkBinding"): &sourcesv1alpha1.SinkBinding{},
 }
 
 func NewDefaultingAdmissionController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
@@ -105,7 +111,7 @@ func NewDefaultingAdmissionController(ctx context.Context, cmw configmap.Watcher
 		"/defaulting",
 
 		// The resources to validate and default.
-		types,
+		kinds,
 
 		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
 		func(ctx context.Context) context.Context {
@@ -127,7 +133,7 @@ func NewValidationAdmissionController(ctx context.Context, cmw configmap.Watcher
 		"/resource-validation",
 
 		// The resources to validate and default.
-		types,
+		kinds,
 
 		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
 		func(ctx context.Context) context.Context {
@@ -167,6 +173,25 @@ func NewConfigValidationController(ctx context.Context, cmw configmap.Watcher) *
 	)
 }
 
+func NewSinkBindingWebhook(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	sbresolver := sinkbinding.WithContextFactory(ctx, func(types.NamespacedName) {})
+
+	return psbinding.NewAdmissionController(ctx,
+
+		// Name of the resource webhook.
+		"sinkbindings.webhook.sources.knative.dev",
+
+		// The path on which to serve the webhook.
+		"/sinkbindings",
+
+		// How to get all the Bindables for configuring the mutating webhook.
+		sinkbinding.ListAll,
+
+		// How to setup the context prior to invoking Do/Undo.
+		sbresolver,
+	)
+}
+
 func main() {
 	ctx := webhook.WithOptions(signals.NewContext(), webhook.Options{
 		ServiceName: "webhook",
@@ -193,6 +218,10 @@ func main() {
 
 		// Sources
 		github.NewController,
+
+		// Bindings
+		// For each binding we have a controller and a binding webhook.
+		sinkbinding.NewController, NewSinkBindingWebhook,
 
 		// Contour KIngress controller.
 		contour.NewController,
